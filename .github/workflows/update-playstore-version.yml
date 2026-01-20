@@ -1,0 +1,120 @@
+name: Update Play Store App Version
+
+on:
+  schedule:
+    # Run daily at 2:00 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:  # Allow manual execution
+
+jobs:
+  update-version:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      
+      - name: Get Play Store version
+        id: playstore
+        run: |
+          # Install google-play-scraper
+          npm install -g google-play-scraper
+          
+          # Retrieve app version
+          PACKAGE_NAME="com.panasonic.ACCsmart"
+          
+          VERSION=$(node -e "
+            const gplay = require('google-play-scraper');
+            gplay.app({appId: '$PACKAGE_NAME'})
+              .then(app => {
+                console.log(app.version);
+              })
+              .catch(err => {
+                console.error('Error retrieving version:', err);
+                process.exit(1);
+              });
+          ")
+          
+          if [ -z "$VERSION" ]; then
+            echo "Error: version not found"
+            exit 1
+          fi
+          
+          echo "Version found: $VERSION"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Check current version in const.py
+        id: check
+        run: |
+          CURRENT_VERSION=$(grep "DEFAULT_X_APP_VERSION" aioaquarea/const.py | grep -oP '"\K[^"]+')
+          echo "current_version=$CURRENT_VERSION" >> $GITHUB_OUTPUT
+          echo "Current version in code: $CURRENT_VERSION"
+          echo "Version on Play Store: ${{ steps.playstore.outputs.version }}"
+          
+          if [ "$CURRENT_VERSION" = "${{ steps.playstore.outputs.version }}" ]; then
+            echo "needs_update=false" >> $GITHUB_OUTPUT
+            echo "Version is already up to date"
+          else
+            echo "needs_update=true" >> $GITHUB_OUTPUT
+            echo "Update is needed"
+          fi
+      
+      - name: Update const.py
+        if: steps.check.outputs.needs_update == 'true'
+        run: |
+          NEW_VERSION="${{ steps.playstore.outputs.version }}"
+          
+          # Update the line with DEFAULT_X_APP_VERSION
+          sed -i "s/DEFAULT_X_APP_VERSION = \".*\"/DEFAULT_X_APP_VERSION = \"$NEW_VERSION\"/" aioaquarea/const.py
+          
+          echo "File updated"
+          
+          # Show changes
+          echo "Applied changes:"
+          git diff aioaquarea/const.py
+      
+      - name: Create Pull Request
+        if: steps.check.outputs.needs_update == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "chore: update Panasonic app version to ${{ steps.playstore.outputs.version }}"
+          title: "Update Panasonic ACCsmart app version to ${{ steps.playstore.outputs.version }}"
+          body: |
+            ## Automatic app version update
+            
+            This PR automatically updates the Panasonic ACCsmart app version from the Google Play Store.
+            
+            ### Details
+            - **Previous version**: `${{ steps.check.outputs.current_version }}`
+            - **New version**: `${{ steps.playstore.outputs.version }}`
+            - **Package**: `com.panasonic.ACCsmart`
+            - **Modified file**: `aioaquarea/const.py`
+            
+            ### Links
+            - [App on Play Store](https://play.google.com/store/apps/details?id=com.panasonic.ACCsmart)
+            
+            ---
+            This PR was automatically created by GitHub Actions.
+          branch: update-app-version-${{ steps.playstore.outputs.version }}
+          delete-branch: true
+          labels: |
+            dependencies
+            automated
+      
+      - name: Summary
+        if: always()
+        run: |
+          echo "## Execution Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Package Name**: com.panasonic.ACCsmart" >> $GITHUB_STEP_SUMMARY
+          echo "- **Play Store Version**: ${{ steps.playstore.outputs.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Current Version**: ${{ steps.check.outputs.current_version }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Update Needed**: ${{ steps.check.outputs.needs_update }}" >> $GITHUB_STEP_SUMMARY
